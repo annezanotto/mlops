@@ -10,60 +10,143 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 import openpyxl
+import mlflow
+import mlflow.sklearn
+from sklearn.model_selection import cross_val_score
+from mlflow.models.signature import infer_signature
 
-df = pd.read_csv('creditcard.csv')
+# Configura o URI de rastreamento do MLflow
+mlflow.set_tracking_uri("sqlite:///mlflow.db")
+mlflow.set_experiment("credit_card_fraud_detection")
 
-df=df.drop_duplicates()
+def load_data(dataset_name):
+    df = pd.read_csv(dataset_name)
+    return df
 
-scaler = StandardScaler()
-df[['Time', 'Amount']] = scaler.fit_transform(df[['Time', 'Amount']])
+def preprocess_data(df):
+    df = df.drop_duplicates()
 
-#Balanceamento
+    # Normalização
+    scaler = StandardScaler()
+    df[['Time', 'Amount']] = scaler.fit_transform(df[['Time', 'Amount']])
 
-X = df.drop(columns=['Class'])
-y = df['Class']
+    # Balanceamento
+    X = df.drop(columns=['Class'])
+    y = df['Class']
 
-smote = SMOTE(random_state=42)
-X_res, y_res = smote.fit_resample(X, y)
+    smote = SMOTE(random_state=42)
+    X_res, y_res = smote.fit_resample(X, y)
 
-# Verificar o balanceamento
-print("Distribuição antes do SMOTE:", y.value_counts())
-print("Distribuição depois do SMOTE:", pd.Series(y_res).value_counts())
+    df_resampled = pd.concat([X_res, y_res], axis=1)
+    return X_res, y_res, df_resampled
 
-df_resampled = pd.concat([X_res, y_res], axis=1)  
-df_resampled.head()
-df_resampled.to_csv('dados_normalizados_balanceados.csv', index=False)
+def train_logistic_regression(X, y, dataset_name):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-X_train, X_test, y_train, y_test = train_test_split(X_res, y_res, test_size=0.2, random_state=42)
+    # Regressão Logística
+    lr = LogisticRegression(solver='liblinear', random_state=42)
 
-classifier = {
-    "Logistic Regression": LogisticRegression(),
-    "Decision Tree Classifier": DecisionTreeClassifier(    
-            
-        criterion='gini',         # Função de divisão
-        max_depth=10,             # Profundidade máxima da árvore
-        min_samples_split=2,      # Número mínimo de amostras para dividir um nó
-        min_samples_leaf=1,       # Número mínimo de amostras em uma folha
-        max_features=None,        # Número máximo de features para dividir um nó
-        random_state=42           # Garante reprodutibilidade
-    )
-}
+    lr.fit(X_train, y_train)
+    y_test_pred = lr.predict(X_test)
+    accuracy = accuracy_score(y_test, y_test_pred)
+    precision = precision_score(y_test, y_test_pred)
+    recall = recall_score(y_test, y_test_pred)
 
-for name, clf in classifier.items():
-    print(f"\n=========={name}===========")
-    clf.fit(X_train, y_train)
-    y_pred = clf.predict(X_test)
-    print(f"\n Accuaracy: {accuracy_score(y_test, y_pred)}")
-    print(f"\n Precision: {precision_score(y_test, y_pred)}")
-    print(f"\n Recall: {recall_score(y_test, y_pred)}")
-    print(f"\n F1 Score: {f1_score(y_test, y_pred)}")
+    with mlflow.start_run(run_name="Logistic_Regression"):
+        mlflow.log_params(lr.get_params())
+        mlflow.log_metric("accuracy", accuracy)
+        mlflow.log_metric("precision", precision)
+        mlflow.log_metric("recall", recall)
+        mlflow.set_tag("dataset_used", dataset_name)
 
-    from sklearn.model_selection import cross_val_score
+        signature = infer_signature(X_train, y_train)
+        model_info = mlflow.sklearn.log_model(lr, "logistic_regression_model", 
+                                             signature=signature, 
+                                             input_example=X_train, 
+                                             registered_model_name="LogisticRegression")
 
-# Validação cruzada para o modelo de Regressão Logística
-log_reg_scores = cross_val_score(LogisticRegression(), X_train, y_train, cv=5)  # cv=5 significa 5-fold cross-validation
-print(f"Acurácia média da Regressão Logística: {log_reg_scores.mean()}")
+        loaded_model = mlflow.pyfunc.load_model(model_info.model_uri)
+        predictions = loaded_model.predict(X_test)
 
-# Validação cruzada para o modelo de Árvore de Decisão
-dt_scores = cross_val_score(DecisionTreeClassifier(), X_train, y_train, cv=5)
-print(f"Acurácia média da Árvore de Decisão: {dt_scores.mean()}")
+        result = pd.DataFrame(X_test, columns=X.columns.values)
+        result["label"] = y_test.values
+        result["predictions"] = predictions
+
+        # Usando o MLflow para avaliação (opcional)
+        mlflow.evaluate(
+            data=result,
+            targets="label",
+            predictions="predictions",
+            model_type="classifier",
+        )
+
+        print(result.head())
+    return lr
+
+def train_random_forest(X, y, dataset_name):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    param_grid = {
+        "n_estimators": [50, 100, 200],
+        "max_depth": [10, 20, None],
+        "min_samples_split": [2, 5, 10],
+    }
+
+    rf = RandomForestClassifier(random_state=42)
+
+    for params in (dict(zip(param_grid.keys(), values)) for values in 
+                   [(n, d, s) for n in param_grid["n_estimators"] 
+                               for d in param_grid["max_depth"] 
+                               for s in param_grid["min_samples_split"]]):
+        
+        rf.set_params(**params)
+        rf.fit(X_train, y_train)
+        y_test_pred = rf.predict(X_test)
+        accuracy = accuracy_score(y_test, y_test_pred)
+        precision = precision_score(y_test, y_test_pred)
+        recall = recall_score(y_test, y_test_pred)
+
+        with mlflow.start_run(run_name=f"RF_{params['n_estimators']}_{params['max_depth']}_{params['min_samples_split']}"):
+            mlflow.log_params(params)
+            mlflow.log_metric("accuracy", accuracy)
+            mlflow.log_metric("precision", precision)
+            mlflow.log_metric("recall", recall)
+            mlflow.set_tag("dataset_used", dataset_name)
+
+            signature = infer_signature(X_train, y_train)
+            model_info = mlflow.sklearn.log_model(rf, "random_forest_model", 
+                                                 signature=signature, 
+                                                 input_example=X_train, 
+                                                 registered_model_name="RandomForestGridSearch")
+
+            loaded_model = mlflow.pyfunc.load_model(model_info.model_uri)
+            predictions = loaded_model.predict(X_test)
+
+            result = pd.DataFrame(X_test, columns=X.columns.values)
+            result["label"] = y_test.values
+            result["predictions"] = predictions
+
+            # Usando o MLflow para avaliação (opcional)
+            mlflow.evaluate(
+                data=result,
+                targets="label",
+                predictions="predictions",
+                model_type="classifier",
+            )
+
+            print(result.head())
+    return rf
+
+def main():
+    dataset_name = "creditcard.csv"
+    df = load_data(dataset_name)
+    X, y, mlflow_dataset = preprocess_data(df)
+
+    # Treinar a Regressão Logística
+    lr_model = train_logistic_regression(X, y, dataset_name)
+
+    # Treinar o Random Forest
+    rf_model = train_random_forest(X, y, dataset_name)
+
+if __name__ == "__main__":
+    main()
