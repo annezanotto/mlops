@@ -1,0 +1,9 @@
+mlops/
+mlflow/
+mlruns/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+mlartifact/
