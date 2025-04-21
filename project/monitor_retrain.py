@@ -12,7 +12,8 @@ import subprocess  # Se quiser chamar um script de retraining externo
 REFERENCE_DATA_PATH = "data/creditcard.csv"
 CURRENT_DATA_PATH = "data/current_data.csv"
 OUTPUT_DIR = "reports"
-RETRAIN_SCRIPT = "ml.py"  # substitua se tiver outro nome
+RETRAIN_SCRIPT = "ml.py"
+SERV_SCRIPT = "serv_api.sh"  # substitua se tiver outro nome
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +50,8 @@ def trigger_retrain():
     try:
         subprocess.run(["python3", RETRAIN_SCRIPT], check=True)
         logger.info("✅ Re-treinamento concluído")
+        subprocess.run(["sh", SERV_SCRIPT], check=True)
+
     except Exception as e:
         logger.error(f"❌ Erro no re-treinamento: {e}")
 
@@ -58,7 +61,7 @@ def main():
 
     # Logando no MLflow
     mlflow.set_tracking_uri("http://127.0.0.1:5050")
-    mlflow.set_experiment(experiment_id="223920342058916763")
+    mlflow.set_experiment("CreditCardFraud_ModelRegistry")
 
                             
     with mlflow.start_run(run_name="Drift Monitoring"):
